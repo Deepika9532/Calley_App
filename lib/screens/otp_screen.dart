@@ -7,8 +7,8 @@ import '../widgets/common.dart';
 import 'login_screen.dart';
 
 class OtpScreen extends StatefulWidget {
-  final String email;
-  const OtpScreen({super.key, required this.email});
+  final String email, phone;
+  const OtpScreen({super.key, required this.email, this.phone = ''});
   @override
   State<OtpScreen> createState() => _OtpScreenState();
 }
@@ -50,6 +50,7 @@ class _OtpScreenState extends State<OtpScreen> {
   String get _otp => _ctrls.map((c) => c.text).join();
 
   Future<void> _resend() async {
+    if (_left > 0) return toast(context, 'You can resend in $_left s');
     try {
       await Api.sendOtp(widget.email);
       if (mounted) toast(context, 'OTP resent');
@@ -76,16 +77,17 @@ class _OtpScreenState extends State<OtpScreen> {
   }
 
   Widget _box(int i) => SizedBox(
-        width: 46,
+        width: 38,
+        height: 40,
         child: TextField(
           controller: _ctrls[i],
           focusNode: _nodes[i],
           textAlign: TextAlign.center,
           keyboardType: TextInputType.number,
           maxLength: 1,
-          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
           inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-          decoration: const InputDecoration(counterText: '', contentPadding: EdgeInsets.symmetric(vertical: 14)),
+          decoration: const InputDecoration(counterText: '', contentPadding: EdgeInsets.zero),
           onChanged: (v) {
             if (v.isNotEmpty && i < 5) _nodes[i + 1].requestFocus();
             if (v.isEmpty && i > 0) _nodes[i - 1].requestFocus();
@@ -95,20 +97,22 @@ class _OtpScreenState extends State<OtpScreen> {
       );
 
   @override
-  Widget build(BuildContext context) => AuthScaffold(
-        title: 'Email OTP Verification',
-        subtitle: 'Enter the 6-digit code sent to\n${widget.email}',
+  Widget build(BuildContext context) => AuthShell(
+        centerBody: true,
+        title: 'Whatsapp OTP\nVerification',
+        subtitle: 'Please ensure that the email id mentioned is valid\nas we have sent an OTP to your email.',
+        bottom: Column(mainAxisSize: MainAxisSize.min, children: [
+          SwitchLine(
+              text: "Didn't receive OTP code?",
+              action: _left > 0 ? 'Resend OTP (${_left}s)' : 'Resend OTP',
+              onTap: _resend),
+          LoadingButton(label: 'Verify', loading: _loading, onPressed: _verify),
+        ]),
         children: [
           Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: List.generate(6, _box)),
           const SizedBox(height: 18),
-          Center(
-            child: _left > 0
-                ? Text('Resend OTP in 00:${_left.toString().padLeft(2, '0')}',
-                    style: const TextStyle(color: C.muted))
-                : TextButton(onPressed: _resend, child: const Text('Resend OTP')),
-          ),
-          const SizedBox(height: 18),
-          LoadingButton(label: 'Verify', loading: _loading, onPressed: _verify),
+          Text(widget.phone.isNotEmpty ? '+91 ${widget.phone}?' : widget.email,
+              textAlign: TextAlign.center, style: const TextStyle(fontSize: 13, color: C.text)),
         ],
       );
 }

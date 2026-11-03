@@ -1,38 +1,23 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 import '../core/api.dart';
+import '../core/models.dart';
 import '../core/session.dart';
 import '../core/theme.dart';
 import '../widgets/common.dart';
 import 'app_drawer.dart';
 import 'calls_screen.dart';
+import 'notifications_screen.dart';
+import 'settings_screen.dart';
 
-/// Summary of one calling list, parsed defensively from the API.
-class CallList {
-  final String id, name;
-  final int total, pending, done, scheduled;
-  final List<Map<String, dynamic>> calls;
-  CallList(this.id, this.name, this.total, this.pending, this.done, this.scheduled, this.calls);
+/// Bottom-bar destinations. [play] isn't a tab: it opens the calling queue.
+enum _Tab { home, contacts, play, callLog, schedule }
 
-  factory CallList.fromJson(Map<String, dynamic> j, [List<Map<String, dynamic>> calls = const []]) {
-    String st(Map<String, dynamic> c) => pick(c, ['status', 'callStatus']).toLowerCase();
-    final pending = calls.isNotEmpty
-        ? calls.where((c) => st(c).contains('pend')).length
-        : pickInt(j, ['pending', 'pendingCalls']);
-    final done = calls.isNotEmpty
-        ? calls.where((c) => st(c).contains('call') || st(c).contains('done') || st(c).contains('complet')).length
-        : pickInt(j, ['called', 'done', 'calledCalls', 'completed']);
-    final sched = calls.isNotEmpty
-        ? calls.where((c) => st(c).contains('sched') || st(c).contains('resched')).length
-        : pickInt(j, ['rescheduled', 'scheduled', 'rescheduledCalls']);
-    var total = calls.isNotEmpty ? calls.length : pickInt(j, ['totalCalls', 'total', 'count', 'calls']);
-    if (total == 0) total = pending + done + sched;
-    return CallList(pick(j, ['_id', 'id', 'listId']), pick(j, ['name', 'listName', 'title'], 'Calling List'),
-        total, pending, done, sched, calls);
-  }
-}
-
+/// Dashboard with header actions and the 5-item bottom bar.
+///
+/// Home shows "Load number to call" until a list is picked in Settings, then
+/// that list's stats. Contacts / Call log / Schedule show the loaded list's
+/// calls filtered by status, so they work on real API data.
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
   @override
@@ -40,11 +25,10 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
-  int _tab = 0;
-  bool _loading = true;
+  _Tab _tab = _Tab.home;
+  bool _loading = false;
   String? _error;
-  List<CallList> _lists = [];
-  CallList? _active;
+  CallList? _list;
 
   @override
   void initState() {
@@ -53,14 +37,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Future<void> _load() async {
+    final id = Session.selectedListId;
+    if (id == null) {
+      setState(() => _list = null);
+      return;
+    }
     setState(() {
       _loading = true;
       _error = null;
     });
     try {
-      final res = await Api.lists(Session.userId);
-      _lists = extractList(res).map((e) => CallList.fromJson(e)).toList();
-      if (_lists.isNotEmpty) await _open(_lists.first);
+      final lists = extractList(await Api.lists(Session.userId)).map(CallList.fromJson).toList();
+      final summary = lists.firstWhere((l) => l.id == id,
+          orElse: () => lists.isNotEmpty ? lists.first : CallList(id, 'Calling List', 0, 0, 0, 0, const []));
+      _list = await summary.withDetails();
     } catch (e) {
       _error = e.toString();
     } finally {
@@ -68,206 +58,323 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  Future<void> _open(CallList l) async {
-    try {
-      final res = await Api.listDetail(l.id);
-      final detail = res['list'] is Map ? Map<String, dynamic>.from(res['list']) : res;
-      final merged = {...detail, if (pick(detail, ['name', 'listName']).isEmpty) 'name': l.name, '_id': l.id};
-      _active = CallList.fromJson(merged, extractList(res));
-    } catch (_) {
-      _active = l;
-    }
-    if (mounted) setState(() {});
+  Future<void> _openSettings() async {
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen()));
+    if (mounted) _load();
   }
 
+  void _openNotifications() =>
+      Navigator.push(context, MaterialPageRoute(builder: (_) => const NotificationsScreen()));
+
+  void _startCalling() {
+    final l = _list;
+    if (l == null) {
+      toast(context, 'Select a calling list in Settings first');
+      _openSettings();
+      return;
+    }
+    Navigator.push(context, MaterialPageRoute(builder: (_) => CallsScreen(list: l)));
+  }
+
+  void _onNav(_Tab t) {
+    if (t == _Tab.play) return _startCalling();
+    if (t == _tab) return; // already here: no duplicate rebuild/push
+    setState(() => _tab = t);
+  }
+
+  String get _title => switch (_tab) {
+        _Tab.contacts => 'Contacts',
+        _Tab.callLog => 'Call Log',
+        _Tab.schedule => 'Schedule',
+        _ => 'Dashboard',
+      };
+
   @override
-  Widget build(BuildContext context) => Scaffold(
-        backgroundColor: C.bg,
-        drawer: const AppDrawer(),
-        appBar: AppBar(
-          backgroundColor: Colors.white,
-          title: Row(children: [
-            CircleAvatar(
-                radius: 18,
-                backgroundColor: C.primary,
-                child: Text(Session.name.isNotEmpty ? Session.name[0].toUpperCase() : 'C',
-                    style: const TextStyle(color: Colors.white))),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('Hello ${Session.name}',
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
-                const Text('Calley Personal', style: TextStyle(fontSize: 12, color: C.muted)),
-              ]),
+  Widget build(BuildContext context) => PopScope(
+        // Android back on a non-Home tab returns to Home instead of leaving.
+        canPop: _tab == _Tab.home,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) setState(() => _tab = _Tab.home);
+        },
+        child: Scaffold(
+          drawer: AppDrawer(onSettings: _openSettings, onSync: _load),
+          appBar: AppBar(
+            titleSpacing: 0,
+            leading: Builder(
+              builder: (c) => IconButton(
+                tooltip: 'Menu',
+                icon: const Icon(Icons.menu),
+                onPressed: () => Scaffold.of(c).openDrawer(),
+              ),
             ),
-          ]),
-          actions: [
-            IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
-            IconButton(icon: const Icon(Icons.notifications_none), onPressed: () {}),
-          ],
-        ),
-        floatingActionButton: const WhatsAppFab(),
-        body: _tab == 0 ? _gettingStarted() : _dashboard(),
-        bottomNavigationBar: NavigationBar(
-          selectedIndex: _tab,
-          backgroundColor: Colors.white,
-          onDestinationSelected: (i) => setState(() => _tab = i),
-          destinations: const [
-            NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'),
-            NavigationDestination(
-                icon: Icon(Icons.dashboard_outlined), selectedIcon: Icon(Icons.dashboard), label: 'Dashboard'),
-          ],
+            title: Text(_title),
+            actions: [
+              IconButton(
+                tooltip: 'Support',
+                icon: const Icon(Icons.headset_mic_outlined, size: 22),
+                onPressed: () => openSupport(context),
+              ),
+              IconButton(
+                tooltip: 'Notifications',
+                icon: const Icon(Icons.notifications_none, size: 22),
+                onPressed: _openNotifications,
+              ),
+              const SizedBox(width: 4),
+            ],
+          ),
+          body: SafeArea(
+            bottom: false,
+            child: Padding(padding: const EdgeInsets.fromLTRB(12, 4, 12, 12), child: _body()),
+          ),
+          bottomNavigationBar: _BottomBar(selected: _tab, onTap: _onNav),
         ),
       );
 
-  Widget _gettingStarted() => ListView(padding: const EdgeInsets.all(16), children: [
-        Container(
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(colors: [C.primary, C.primaryDark]),
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('If you are here for the first time then ensure that you have uploaded the list to call '
-                'from calley Web Panel hosted on https://app.getcalley.com',
-                style: TextStyle(color: Colors.white, height: 1.4)),
-            const SizedBox(height: 16),
-            GestureDetector(
-              onTap: () => launchUrl(Uri.parse('https://www.youtube.com/watch?v=bP4U-L4EHcg'),
-                  mode: LaunchMode.externalApplication),
-              child: Container(
-                height: 160,
-                decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(12)),
-                child: const Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                  Icon(Icons.play_circle_fill, color: Colors.white, size: 56),
-                  SizedBox(height: 8),
-                  Text('2 MINUTE CHALLENGE',
-                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, letterSpacing: 1)),
-                  Text('Watch how to use Calley', style: TextStyle(color: Colors.white70)),
-                ]),
-              ),
-            ),
-          ]),
-        ),
-        const SizedBox(height: 20),
-        Row(children: [
-          Expanded(
-            child: OutlinedButton.icon(
-              style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(50)),
-              onPressed: () => launchUrl(Uri.parse('https://wa.me/917676286822'),
-                  mode: LaunchMode.externalApplication),
-              icon: const Icon(Icons.chat, color: C.whatsapp),
-              label: const Text('Support'),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: ElevatedButton(onPressed: () => setState(() => _tab = 1), child: const Text('Start Calling Now')),
-          ),
-        ]),
-      ]);
-
-  Widget _dashboard() {
+  Widget _body() {
     if (_loading) return const Center(child: CircularProgressIndicator());
-    if (_error != null) {
-      return Center(
-          child: Padding(
-        padding: const EdgeInsets.all(24),
+    if (_error != null) return _errorView();
+    if (_tab == _Tab.home) return _list == null ? _loadNumbersView() : _statsView(_list!);
+    final l = _list;
+    if (l == null) return _pickListPrompt();
+    return switch (_tab) {
+      _Tab.contacts => CallTiles(calls: l.calls, emptyText: 'No contacts in ${l.name}'),
+      _Tab.callLog => CallTiles(calls: filterCalls(l.calls, CallFilter.called), emptyText: 'No calls made yet'),
+      _ => CallTiles(
+          calls: filterCalls(l.calls, CallFilter.scheduled),
+          showSchedule: true,
+          emptyText: 'No scheduled calls'),
+    };
+  }
+
+  Widget _errorView() => Center(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Icon(Icons.cloud_off, size: 48, color: C.muted),
-          const SizedBox(height: 12),
+          const Icon(Icons.cloud_off, size: 44, color: C.muted),
+          const SizedBox(height: 10),
           Text(_error!, textAlign: TextAlign.center),
-          const SizedBox(height: 12),
           TextButton(onPressed: _load, child: const Text('Retry')),
         ]),
-      ));
-    }
-    if (_active == null) {
-      return const Center(child: Text('No calling lists assigned yet.', style: TextStyle(color: C.muted)));
-    }
-    final l = _active!;
-    return RefreshIndicator(
-      onRefresh: _load,
-      child: ListView(padding: const EdgeInsets.all(16), children: [
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
-          child: Column(children: [
-            Row(children: [
+      );
+
+  Widget _pickListPrompt() => Center(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Icon(Icons.list_alt, size: 44, color: C.muted),
+          const SizedBox(height: 10),
+          const Text('No calling list loaded', style: TextStyle(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          const Text('Pick one in Settings → Calling Lists', style: TextStyle(color: C.muted)),
+          const SizedBox(height: 14),
+          SizedBox(
+            width: 200,
+            child: ElevatedButton(onPressed: _openSettings, child: const Text('Open Settings')),
+          ),
+        ]),
+      );
+
+  Widget _loadNumbersView() => Column(children: [
+        const GreetingCard(headline: 'Welcome to Calley!'),
+        const SizedBox(height: 12),
+        Expanded(
+          child: SectionCard(
+            title: 'LOAD NUMBER TO CALL',
+            expand: true,
+            padding: EdgeInsets.zero,
+            child: const Column(children: [
+              Padding(
+                padding: EdgeInsets.fromLTRB(24, 22, 24, 0),
+                child: Text.rich(
+                  TextSpan(style: TextStyle(fontSize: 12.5, height: 1.6, color: C.text), children: [
+                    TextSpan(text: 'Visit '),
+                    TextSpan(text: 'https://app.getcalley.com', style: TextStyle(color: C.primary)),
+                    TextSpan(text: ' to upload numbers that you wish to call using Calley Mobile App.'),
+                  ]),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Expanded(child: _UploadIllustration()),
+            ]),
+          ),
+        ),
+        const SizedBox(height: 12),
+        CallActionRow(onStart: _startCalling),
+      ]);
+
+  Widget _statsView(CallList l) => RefreshIndicator(
+        onRefresh: _load,
+        child: ListView(children: [
+          if (Api.demoMode) const _DemoBanner(),
+          Container(
+            padding: const EdgeInsets.fromLTRB(20, 16, 14, 16),
+            decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: const Color(0xFFE5E7EB))),
+            child: Row(children: [
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  const Text('LOADED', style: TextStyle(color: C.muted, fontSize: 12)),
-                  DropdownButtonHideUnderline(
-                    child: DropdownButton<String>(
-                      value: l.id,
-                      isDense: true,
-                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: C.text),
-                      items: [
-                        for (final x in _lists) DropdownMenuItem(value: x.id, child: Text(x.name))
-                      ],
-                      onChanged: (id) => _open(_lists.firstWhere((x) => x.id == id)),
-                    ),
-                  ),
+                  Text(l.name, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                  const SizedBox(height: 2),
+                  Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
+                    Text('${l.total}',
+                        style: const TextStyle(color: C.primary, fontSize: 24, fontWeight: FontWeight.w800)),
+                    const SizedBox(width: 4),
+                    const Text('CALLS', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500)),
+                  ]),
                 ]),
               ),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(color: C.primary, borderRadius: BorderRadius.circular(20)),
-                child: Text('${l.total} CALLS',
-                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 12)),
+                width: 48,
+                height: 44,
+                decoration: BoxDecoration(color: C.primary, borderRadius: BorderRadius.circular(10)),
+                alignment: Alignment.center,
+                child: Text(Session.name.isEmpty ? 'C' : Session.name[0].toUpperCase(),
+                    style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w700)),
               ),
             ]),
-            const SizedBox(height: 20),
-            SizedBox(
-              height: 200,
-              child: TweenAnimationBuilder<double>(
-                tween: Tween(begin: 0, end: 1),
-                duration: const Duration(milliseconds: 900),
-                curve: Curves.easeOutCubic,
-                builder: (_, t, _) => CustomPaint(
-                  painter: _Donut([l.pending.toDouble(), l.done.toDouble(), l.scheduled.toDouble()],
-                      const [C.pending, C.done, C.schedule], t),
-                  child: Center(
-                    child: Column(mainAxisSize: MainAxisSize.min, children: [
-                      Text('${l.total}', style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w800)),
-                      const Text('Total Calls', style: TextStyle(color: C.muted)),
-                    ]),
-                  ),
-                ),
+          ),
+          const SizedBox(height: 36),
+          SizedBox(
+            height: 170,
+            child: TweenAnimationBuilder<double>(
+              tween: Tween(begin: 0, end: 1),
+              duration: const Duration(milliseconds: 900),
+              curve: Curves.easeOutCubic,
+              builder: (_, t, _) => CustomPaint(
+                painter: _Donut([l.done, l.scheduled, l.pending].map((e) => e.toDouble()).toList(),
+                    const [C.done, C.schedule, C.pending], t),
               ),
+            ),
+          ),
+          const SizedBox(height: 40),
+          Row(children: [
+            _stat('Pending', l.pending, C.pending, C.pendingBg),
+            const SizedBox(width: 8),
+            _stat('Done', l.done, C.doneGreen, C.doneBg),
+            const SizedBox(width: 8),
+            _stat('Schedule', l.scheduled, C.schedule, C.scheduleBg),
+          ]),
+          const SizedBox(height: 18),
+          ElevatedButton(onPressed: _startCalling, child: const Text('Star Calling Now')),
+        ]),
+      );
+
+  Widget _stat(String label, int v, Color bar, Color bg) => Expanded(
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(10, 12, 6, 12),
+          decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(12)),
+          child: Row(children: [
+            Container(width: 3, height: 34, decoration: BoxDecoration(color: bar, borderRadius: BorderRadius.circular(2))),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500)),
+                Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
+                  Text(v.toString().padLeft(2, '0'), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+                  const SizedBox(width: 3),
+                  const Text('Calls', style: TextStyle(fontSize: 8.5, color: C.muted)),
+                ]),
+              ]),
             ),
           ]),
         ),
-        const SizedBox(height: 14),
-        Row(children: [
-          _stat('Pending', l.pending, C.pending),
-          const SizedBox(width: 10),
-          _stat('Done', l.done, C.done),
-          const SizedBox(width: 10),
-          _stat('Schedule', l.scheduled, C.schedule),
-        ]),
-        const SizedBox(height: 20),
-        ElevatedButton(
-          onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => CallsScreen(list: l))),
-          child: const Text('Start Calling Now'),
+      );
+}
+
+/// Rounded bottom bar from the Figma; each item has a 48dp tap target.
+class _BottomBar extends StatelessWidget {
+  final _Tab selected;
+  final ValueChanged<_Tab> onTap;
+  const _BottomBar({required this.selected, required this.onTap});
+
+  static const _items = [
+    (_Tab.home, Icons.home_outlined, 'Home'),
+    (_Tab.contacts, Icons.contact_mail_outlined, 'Contacts'),
+    (_Tab.play, Icons.play_arrow_outlined, 'Start calling'),
+    (_Tab.callLog, Icons.phone_callback_outlined, 'Call log'),
+    (_Tab.schedule, Icons.calendar_month_outlined, 'Schedule'),
+  ];
+
+  @override
+  Widget build(BuildContext context) => Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+          border: Border(top: BorderSide(color: Color(0xFF93B4F5))),
         ),
-      ]),
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Row(children: [
+              for (final (tab, icon, label) in _items)
+                Expanded(
+                  child: Tooltip(
+                    message: label,
+                    child: Semantics(
+                      button: true,
+                      selected: tab == selected,
+                      label: label,
+                      child: InkResponse(
+                        onTap: () => onTap(tab),
+                        radius: 28,
+                        child: SizedBox(
+                          height: 52,
+                          child: Center(
+                            child: _pill(tab, icon),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ]),
+          ),
+        ),
+      );
+
+  // The play button is always the blue pill, as in Figma; the selected tab gets a tint.
+  Widget _pill(_Tab tab, IconData icon) {
+    final isPlay = tab == _Tab.play;
+    final isSel = tab == selected;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
+      width: isPlay ? 50 : 40,
+      height: 34,
+      decoration: BoxDecoration(
+        color: isPlay ? C.primary : (isSel ? C.primary.withValues(alpha: .12) : Colors.transparent),
+        borderRadius: BorderRadius.circular(17),
+      ),
+      child: Icon(icon, size: 21, color: isPlay ? Colors.white : (isSel ? C.primary : C.text)),
     );
   }
+}
 
-  Widget _stat(String label, int v, Color c) => Expanded(
-        child: Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(12),
-              border: Border(left: BorderSide(color: c, width: 4))),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(label, style: const TextStyle(color: C.muted, fontSize: 12)),
-            const SizedBox(height: 4),
-            Text('$v Calls', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: c)),
-          ]),
+class _DemoBanner extends StatelessWidget {
+  const _DemoBanner();
+  @override
+  Widget build(BuildContext context) => Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+            color: C.pendingBg, borderRadius: BorderRadius.circular(10), border: Border.all(color: C.pending)),
+        child: const Row(children: [
+          Icon(Icons.info_outline, color: C.pending, size: 18),
+          SizedBox(width: 8),
+          Expanded(
+              child: Text('Server unreachable. Showing sample data from the API documentation.',
+                  style: TextStyle(fontSize: 11.5))),
+        ]),
+      );
+}
+
+/// "Agent with phone upload" illustration from the Figma design.
+class _UploadIllustration extends StatelessWidget {
+  const _UploadIllustration();
+  @override
+  Widget build(BuildContext context) => ClipRRect(
+        borderRadius: const BorderRadius.vertical(bottom: Radius.circular(14)),
+        child: Align(
+          alignment: Alignment.bottomLeft,
+          child: Image.asset('assets/images/upload_illustration.png', fit: BoxFit.contain),
         ),
       );
 }
@@ -280,21 +387,24 @@ class _Donut extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final r = math.min(size.width, size.height) / 2 - 12;
-    final rect = Rect.fromCircle(center: size.center(Offset.zero), radius: r);
+    final c = size.center(Offset.zero);
+    final r = math.min(size.width, size.height) / 2 - 16;
+    final rect = Rect.fromCircle(center: c, radius: r);
+    canvas.drawCircle(c, r * .62, Paint()..color = const Color(0xFFF1F2F4));
     final p = Paint()
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 22
-      ..strokeCap = StrokeCap.butt;
+      ..strokeWidth = 30;
     final sum = values.fold<double>(0, (a, b) => a + b);
     if (sum == 0) {
       canvas.drawArc(rect, 0, math.pi * 2, false, p..color = C.border);
       return;
     }
-    var start = -math.pi / 2;
+    const gap = .05;
+    var start = -math.pi / 2 + gap / 2;
     for (var i = 0; i < values.length; i++) {
+      if (values[i] == 0) continue;
       final sweep = values[i] / sum * math.pi * 2 * t;
-      canvas.drawArc(rect, start, sweep, false, p..color = colors[i]);
+      canvas.drawArc(rect, start, math.max(0, sweep - gap), false, p..color = colors[i]);
       start += sweep;
     }
   }

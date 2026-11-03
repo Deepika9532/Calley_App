@@ -28,11 +28,18 @@ class Session {
   static Future<void> logout() async {
     user = null;
     await _p.remove('user');
+    await _p.remove('listId');
   }
 
-  static String get userId =>
-      (user?['_id'] ?? user?['id'] ?? user?['userId'] ?? '').toString();
-  static String get name =>
-      (user?['username'] ?? user?['name'] ?? 'Calley User').toString();
+  /// Phone entered at registration, remembered per email (the API doesn't store it).
+  static Future<void> savePhone(String email, String phone) => _p.setString('phone:$email', phone);
+  static String get phone => _p.getString('phone:$email') ?? '';
+
+  /// Calling list chosen on the Settings screen.
+  static String? get selectedListId => _p.getString('listId');
+  static Future<void> selectList(String id) => _p.setString('listId', id);
+
+  static String get userId => (user?['_id'] ?? user?['id'] ?? user?['userId'] ?? '').toString();
+  static String get name => (user?['username'] ?? user?['name'] ?? 'Calley User').toString();
   static String get email => (user?['email'] ?? '').toString();
 }

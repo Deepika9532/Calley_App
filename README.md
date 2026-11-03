@@ -32,4 +32,3 @@ flutter build apk --debug   # build/app/outputs/flutter-apk/app-debug.apk
 ```
 
 Base URL: `https://mock-api.calleyacd.com` (change in `lib/core/api.dart`).
-"# Calley_App" 

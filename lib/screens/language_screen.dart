@@ -43,25 +43,32 @@ class _LanguageScreenState extends State<LanguageScreen> {
             child: Column(children: [
               const SizedBox(height: 8),
               const Text('Choose Your Language',
-                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: C.text)),
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500, color: C.text)),
               const SizedBox(height: 20),
               Expanded(
-                child: Container(
-                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
+                child: Material(
+                  color: Colors.white,
+                  clipBehavior: Clip.antiAlias,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    side: const BorderSide(color: Color(0xFFCBD5E1)),
+                  ),
                   child: ListView.separated(
-                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
                     itemCount: langs.length,
-                    separatorBuilder: (_, _) => const Divider(height: 1, indent: 16, endIndent: 16),
+                    separatorBuilder: (_, _) => const SizedBox(height: 2),
                     itemBuilder: (_, i) {
                       final (name, hi) = langs[i];
                       final sel = selected == name;
                       return ListTile(
                         onTap: () => setState(() => selected = name),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 28),
+                        dense: true,
                         title: Text(name,
-                            style: TextStyle(fontWeight: FontWeight.w600, color: sel ? C.primary : C.text)),
-                        subtitle: Text(hi),
+                            style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 14, color: C.text)),
+                        subtitle: Text(hi, style: const TextStyle(fontSize: 12.5, color: C.muted)),
                         trailing: Icon(sel ? Icons.radio_button_checked : Icons.radio_button_off,
-                            color: sel ? C.primary : C.muted),
+                            size: 20, color: C.text),
                       );
                     },
                   ),
